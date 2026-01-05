@@ -12,6 +12,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+DATA_PATH = Path(__file__).parent / "data" / "DataFrame_geral_simulador.csv"
+
 st.write("Current dir:", Path.cwd())
 st.write("Files in project root:", [p.name for p in Path(".").iterdir()])
 st.write("Files in data/:", [p.name for p in (Path(".") / "data").iterdir()])
@@ -23,7 +25,6 @@ st.write("DATA_PATH exists?", DATA_PATH.exists(), str(DATA_PATH))
 @st.cache_data
 def load_data():
     # Ajuste este caminho quando rodar localmente / no Streamlit Cloud
-    DATA_PATH = Path(__file__).parent / "data" / "DataFrame_geral_simulador.csv"
     
     df = pd.read_csv(DATA_PATH, sep=";", encoding="utf-8", low_memory=False)
 
