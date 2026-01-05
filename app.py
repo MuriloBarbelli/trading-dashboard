@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from pathlib import Path
 
 # ============================================================
 # CONFIG
@@ -11,15 +12,20 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+st.write("Current dir:", Path.cwd())
+st.write("Files in project root:", [p.name for p in Path(".").iterdir()])
+st.write("Files in data/:", [p.name for p in (Path(".") / "data").iterdir()])
+st.write("DATA_PATH exists?", DATA_PATH.exists(), str(DATA_PATH))
+
 # ============================================================
 # LOAD DATA
 # ============================================================
 @st.cache_data
 def load_data():
     # Ajuste este caminho quando rodar localmente / no Streamlit Cloud
-    file_path = r"data\DataFrame_geral_simulador.csv"
-
-    df = pd.read_csv(file_path, sep=",", encoding="utf-8", low_memory=False)
+    DATA_PATH = Path(__file__).parent / "data" / "DataFrame_geral_simulador.csv"
+    
+    df = pd.read_csv(DATA_PATH, sep=";", encoding="utf-8", low_memory=False)
 
     # DataHora = Data + Abertura (você usa Abertura/Fechamento como hh:mm:ss)
     df["DataHora"] = pd.to_datetime(
