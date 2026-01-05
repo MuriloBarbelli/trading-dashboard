@@ -26,7 +26,7 @@ st.write("DATA_PATH exists?", DATA_PATH.exists(), str(DATA_PATH))
 def load_data():
     # Ajuste este caminho quando rodar localmente / no Streamlit Cloud
     
-    df = pd.read_csv(DATA_PATH, sep=";", encoding="utf-8", low_memory=False)
+    df = pd.read_csv(DATA_PATH, sep=";", encoding="latin1", low_memory=False)
 
     # DataHora = Data + Abertura (você usa Abertura/Fechamento como hh:mm:ss)
     df["DataHora"] = pd.to_datetime(
