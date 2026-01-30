@@ -28,6 +28,10 @@ def load_data():
         df["Data"].astype(str) + " " + df["Abertura"].astype(str),
         errors="coerce"
     )
+
+    # meta de qualidade (antes do drop)
+    invalid_dt = int(df["DataHora"].isna().sum())
+
     df = df.dropna(subset=["DataHora"]).sort_values("DataHora")
 
     df["Ano-Mes"] = df["DataHora"].dt.strftime("%Y-%m")
@@ -36,6 +40,8 @@ def load_data():
     # Custo e lucro líquido
     df["Custo Operação (pts)"] = 2.5
     df["Lucro Líquido (pts)"] = df["Res. Operação (pts)"] - df["Custo Operação (pts)"]
+
+    df.attrs["meta_invalid_datetime_rows"] = invalid_dt
 
     return df
 
@@ -202,6 +208,73 @@ def plot_patrimonio_4_linhas(df_real, df_stop, df_janela, df_combo):
     )
     return fig
 
+def risk_kpis(df_x: pd.DataFrame,
+              time_col: str = "DataHora",
+              pnl_col: str = "Lucro Líquido (pts)"):
+    """
+    KPIs de risco sobre a curva acumulada (equity) em 'pontos'.
+    Implementação defensiva: retorna None/0 quando não há dados.
+    """
+    if df_x is None or len(df_x) == 0:
+        return {
+            "max_dd": 0.0,
+            "vol": 0.0,
+            "ret_dd": float("inf"),
+            "pct_time_dd": 0.0,
+            "avg_recovery": 0.0
+        }
+
+    d = df_x[[time_col, pnl_col]].copy()
+    d = d.dropna(subset=[time_col, pnl_col]).sort_values(time_col)
+    if len(d) == 0:
+        return {
+            "max_dd": 0.0,
+            "vol": 0.0,
+            "ret_dd": float("inf"),
+            "pct_time_dd": 0.0,
+            "avg_recovery": 0.0
+        }
+
+    pnl = d[pnl_col].astype(float)
+    equity = pnl.cumsum()
+
+    # drawdown
+    peak = equity.cummax()
+    dd = equity - peak  # <= 0
+    max_dd = float(dd.min())  # mais negativo
+
+    # % do tempo em drawdown (por operação)
+    pct_time_dd = float((dd < 0).mean() * 100.0)
+
+    # retorno / drawdown (quanto retorna por unidade de pior queda)
+    total_ret = float(equity.iloc[-1])
+    ret_dd = (total_ret / abs(max_dd)) if max_dd < 0 else float("inf")
+
+    # volatilidade: desvio-padrão do PnL diário (leitura gerencial simples)
+    daily = d.set_index(time_col)[pnl_col].astype(float).resample("D").sum()
+    vol = float(daily.std(ddof=0)) if len(daily) > 1 else 0.0
+
+    # tempo médio de recuperação: número de operações para voltar ao topo anterior
+    peak_mask = equity.eq(peak)
+    idx_peaks = list(d.index[peak_mask])
+
+    rec_lengths = []
+    if len(idx_peaks) >= 2:
+        for i in range(len(idx_peaks) - 1):
+            a = idx_peaks[i]
+            b = idx_peaks[i + 1]
+            rec_lengths.append(int(b - a))
+    avg_recovery = float(pd.Series(rec_lengths).mean()) if rec_lengths else 0.0
+
+    return {
+        "max_dd": max_dd,
+        "vol": vol,
+        "ret_dd": ret_dd,
+        "pct_time_dd": pct_time_dd,
+        "avg_recovery": avg_recovery
+    }
+
+
 # ============================================================
 # SIDEBAR - PERÍODO
 # ============================================================
@@ -225,6 +298,7 @@ df_filtrado["Total Parcial (pts)"] = df_filtrado["Lucro Líquido (pts)"].astype(
 menu = st.sidebar.radio(
     "Selecione a Visualização",
     [
+        "Contexto & Dados",
         "Operações",
         "Análise por Faixa Horária",
         "Análise por Dia do Mês",
@@ -233,9 +307,90 @@ menu = st.sidebar.radio(
 )
 
 # ============================================================
+# 0) Contexto & Dados
+# ============================================================
+
+if menu == "Contexto & Dados":
+    st.title("Contexto & Dados")
+
+    st.info(
+    "**Sobre este dashboard**\n\n"
+    "Este dashboard é utilizado para acompanhar **performance, risco e estabilidade** "
+    "de uma série temporal de resultados operacionais ao longo do tempo.\n\n"
+    "**Objetivo:** dar visibilidade à evolução do desempenho e **apoiar decisões de ajuste "
+    "no gerenciamento de risco**, a partir de métricas como drawdown, volatilidade, "
+    "distribuição de resultados e tempo de recuperação.\n\n"
+    "**O que este dashboard faz:** analisa o comportamento estatístico da série histórica, "
+    "identifica períodos de estresse, variabilidade e eficiência de retorno sob diferentes "
+    "condições operacionais.\n\n"
+    "**O que este dashboard NÃO faz:** não é recomendação de investimento, não compara ativos "
+    "e não propõe estratégias. O foco é **análise de dados aplicada ao controle de risco e "
+    "suporte à decisão**.",
+    icon="🧭"
+)
+
+    st.caption(
+    "Nota: as métricas são calculadas sobre a curva acumulada de resultados (em pontos), "
+    "com foco em leitura gerencial, acompanhamento de risco e transparência analítica."
+    )
+
+
+    st.markdown("---")
+
+    # Fonte
+    st.subheader("Fonte dos dados")
+    st.write(f"- Arquivo: `{DATA_PATH}`")
+    st.write("- Unidade de análise: **1 linha = 1 operação (trade)**")
+
+    # Período / volume
+    st.subheader("Período analisado e volume")
+    dt_min = df["DataHora"].min()
+    dt_max = df["DataHora"].max()
+    n_ops = len(df)
+    n_dias = df["DataHora"].dt.date.nunique()
+    ops_dia = (n_ops / n_dias) if n_dias else 0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Início", dt_min.strftime("%Y-%m-%d") if pd.notna(dt_min) else "—")
+    c2.metric("Fim", dt_max.strftime("%Y-%m-%d") if pd.notna(dt_max) else "—")
+    c3.metric("Operações", f"{n_ops:,}".replace(",", "."))
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Dias com operações", f"{n_dias:,}".replace(",", "."))
+    c5.metric("Ops / dia (média)", f"{ops_dia:,.1f}")
+    c6.metric("Colunas", str(len(df.columns)))
+
+    # Missing
+    st.subheader("Tratamento de missing / dados inválidos")
+    invalid_dt = int(df.attrs.get("meta_invalid_datetime_rows", 0))
+    st.write(f"- Linhas descartadas por **DataHora inválido**: **{invalid_dt}**")
+    st.write("- Regra: `DataHora = Data + Abertura`; valores inválidos são removidos para garantir ordenação temporal.")
+
+    # Outliers (diagnóstico simples)
+    st.subheader("Outliers (diagnóstico)")
+    s = df["Lucro Líquido (pts)"].astype(float)
+    p01, p99 = s.quantile(0.01), s.quantile(0.99)
+    out = int(((s < p01) | (s > p99)).sum())
+    st.write(f"- Outliers (fora de P1–P99 do lucro líquido): **{out}** operações")
+    st.caption("Observação: transparência/diagnóstico. Não há winsorização/cap automático nesta versão.")
+
+    # Premissas
+    st.subheader("Premissas adotadas")
+    st.write("- Custo operacional fixo: **2.5 pts por operação**")
+    st.write("- Métrica principal no dashboard: **Lucro Líquido (pts)** = Resultado (pts) − Custo (pts)")
+    st.write("- A ordenação temporal e os KPIs usam `DataHora`.")
+
+    # Limitações
+    st.subheader("Limitações do dataset")
+    st.write("- Dataset é **operacional (trades)**, não contém livro de ofertas/tick-a-tick.")
+    st.write("- Custos estão simplificados (não inclui variações por condições de mercado).")
+    st.write("- KPIs de risco aqui são calculados sobre a **curva acumulada em pontos**, para leitura gerencial (não otimização financeira).")
+
+
+# ============================================================
 # 1) OPERAÇÕES
 # ============================================================
-if menu == "Operações":
+elif menu == "Operações":
     lucro_bruto = df_filtrado[df_filtrado["Res. Operação (pts)"] > 0]["Res. Operação (pts)"].sum()
     prejuizo_bruto = df_filtrado[df_filtrado["Res. Operação (pts)"] < 0]["Res. Operação (pts)"].sum()
     saldo_total = lucro_bruto + prejuizo_bruto
@@ -271,26 +426,75 @@ if menu == "Operações":
         styled_df["Preço Venda"] = styled_df["Preço Venda"].map("{:,.0f}".format)
         styled_df["Total Parcial (pts)"] = styled_df["Total Parcial (pts)"].map("{:,.1f}".format)
 
-        st.dataframe(styled_df.style.applymap(highlight_values, subset=["Res. Operação (pts)", "Total Parcial (pts)"]))
+        st.dataframe(styled_df.style.applymap(highlight_values, subset=["Res. Operação (pts)", "Total Parcial (pts)"]), height=700)
 
     with col_resumo:
         st.markdown("<style> .small-font { font-size:12px; } </style>", unsafe_allow_html=True)
         st.markdown("### Resumo das Operações", unsafe_allow_html=True)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f'<p class="small-font">Lucro Bruto: <b>{lucro_bruto:.1f} pts</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Prejuízo Bruto: <b>{prejuizo_bruto:.1f} pts</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Saldo Total: <b>{saldo_total:.1f} pts</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Custos: <b>{custos_totais:.1f} pts</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Saldo Líquido Total: <b>{saldo_liquido:.1f} pts</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Fator de Lucro: <b>{fator_lucro:.2f}</b></p>', unsafe_allow_html=True)
+        # =========================================================
+        # 1) KPIs principais (primeira dobra) — poucos e fortes
+        # =========================================================
+        # Escolha: o que “vende” rapidamente o dashboard
+        # (mantendo coerência com risco e resultado)
+        k1, k2 = st.columns(2)
+        with k1:
+            st.metric("Saldo Líquido (pts)", f"{saldo_liquido:,.1f}")
+            st.metric("Total de Operações", f"{total_operacoes:,}".replace(",", "."))
+        with k2:
+            st.metric("% Gain", f"{percentual_gain:.1f}%")
+            st.metric("Fator de Lucro", f"{fator_lucro:.2f}")
 
-        with col2:
-            st.markdown(f'<p class="small-font">Total de Operações: <b>{total_operacoes}</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Operações Gain: <b>{operacoes_gain}</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">Operações Loss: <b>{operacoes_loss}</b></p>', unsafe_allow_html=True)
-            st.markdown(f'<p class="small-font">% Operações Gain: <b>{percentual_gain:.1f}%</b></p>', unsafe_allow_html=True)
+        st.markdown("---")
+
+        # =========================================================
+        # 2) Abas para não “espremar” conteúdo
+        # =========================================================
+        tab_resumo, tab_risco = st.tabs(["📌 Resumo", "⚠️ Risco"])
+
+        # -----------------------------
+        # Aba RESUMO (mantém tudo)
+        # -----------------------------
+        with tab_resumo:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f'<p class="small-font">Lucro Bruto: <b>{lucro_bruto:.1f} pts</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Prejuízo Bruto: <b>{prejuizo_bruto:.1f} pts</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Saldo Total: <b>{saldo_total:.1f} pts</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Custos: <b>{custos_totais:.1f} pts</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Saldo Líquido Total: <b>{saldo_liquido:.1f} pts</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Fator de Lucro: <b>{fator_lucro:.2f}</b></p>', unsafe_allow_html=True)
+
+            with col2:
+                st.markdown(f'<p class="small-font">Total de Operações: <b>{total_operacoes}</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Operações Gain: <b>{operacoes_gain}</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">Operações Loss: <b>{operacoes_loss}</b></p>', unsafe_allow_html=True)
+                st.markdown(f'<p class="small-font">% Operações Gain: <b>{percentual_gain:.1f}%</b></p>', unsafe_allow_html=True)
+
+        # -----------------------------
+        # Aba RISCO (mantém tudo)
+        # -----------------------------
+        with tab_risco:
+            st.markdown("#### KPIs de Risco", unsafe_allow_html=True)
+
+            rk = risk_kpis(df_filtrado)
+
+            # rótulos mais curtos (evita truncar e ficar apertado)
+            r1, r2 = st.columns(2)
+            with r1:
+                st.metric("Máx. DD (pts)", f"{rk['max_dd']:,.1f}")
+                st.metric("% tempo em DD", f"{rk['pct_time_dd']:.1f}%")
+                st.metric("Recup. méd. (ops)", f"{rk['avg_recovery']:.1f}")
+
+            with r2:
+                st.metric("Vol (PnL diário)", f"{rk['vol']:,.1f}")
+                val = rk["ret_dd"]
+                st.metric("Ret/DD", f"{val:.2f}" if val != float("inf") else "∞")
+
+            st.caption(
+                "Leitura rápida: DD = queda desde o pico; Vol = variação do resultado diário; "
+                "Ret/DD = eficiência vs pior queda; Recuperação = ops até voltar ao topo."
+            )
 
     tab1, tab2, tab3 = st.tabs(["Patrimônio (pts)", "Resultados por Operação", "Mês a Mês"])
 
@@ -305,7 +509,7 @@ if menu == "Operações":
             line=dict(width=1.2)
         ))
         fig.update_layout(title="Patrimônio (pts)", xaxis_title="Data e Hora", yaxis_title="Total Parcial (pts)",
-                          hovermode="x unified", height=800)
+                          hovermode="x unified", height=550)
         st.plotly_chart(fig, use_container_width=True)
 
     with tab2:
@@ -314,7 +518,7 @@ if menu == "Operações":
         fig = go.Figure()
         fig.add_trace(go.Bar(x=list(range(len(df_filtrado))), y=df_filtrado["Res. Operação (pts)"], marker=dict(color=colors)))
         fig.update_layout(title="Resultados por Operação", xaxis_title="Operações", yaxis_title="Resultado da Operação (pts)",
-                          hovermode="x unified", height=800)
+                          hovermode="x unified", height=550)
         st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
@@ -325,7 +529,7 @@ if menu == "Operações":
         fig = go.Figure()
         fig.add_trace(go.Bar(x=df_mensal["Ano-Mes"], y=df_mensal["Lucro Líquido (pts)"], marker=dict(color=cores)))
         fig.update_layout(title="Mês a Mês", xaxis_title="Mês", yaxis_title="Total de Pontos Líquidos",
-                          hovermode="x unified", height=800)
+                          hovermode="x unified", height=550)
         st.plotly_chart(fig, use_container_width=True)
 
 # ============================================================
